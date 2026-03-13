@@ -1,0 +1,4 @@
+complexity:
+  LongMethod:
+    active: true
+    threshold: 280
