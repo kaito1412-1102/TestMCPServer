@@ -20,10 +20,18 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TestAntigravityTheme {
+                Calculate1()
                 GameDeliverScreen()
             }
         }
     }
+}
+
+fun Calculate1() {
+    var Number = 0
+    Number = Number + 3
+    val result = 4/Number
+    println(result)
 }
 
 @Composable
