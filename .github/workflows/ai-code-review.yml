@@ -16,15 +16,21 @@ jobs:
 
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Fetch base branch
         run: |
           git fetch origin ${{ github.base_ref }}
 
-      - name: Get PR diff
+      - name: Get Kotlin diff only
         run: |
-          git diff --unified=0 origin/${{ github.base_ref }} > pr.diff
-          echo "Diff size:"
+          git diff -U0 \
+            ${{ github.event.pull_request.base.sha }} \
+            ${{ github.event.pull_request.head.sha }} \
+            -- '*.kt' > pr.diff
+
+          echo "Diff lines:"
           wc -l pr.diff
 
       - name: Send diff to Gemini
@@ -37,7 +43,7 @@ jobs:
             contents: [{
               role: "user",
               parts: [{
-                text: "You are a senior Android engineer reviewing a pull request. Review this code diff and suggest improvements. Focus on bugs, code smells, performance issues, and Android best practices.\n\n\($diff)"
+                text: "You are a senior Android engineer reviewing a pull request.\n\nOnly review changed Kotlin code.\nReturn ONLY JSON array like:\n[{\"file\":\"path/file.kt\",\"line\":10,\"comment\":\"issue\"}]\n\nReview this diff:\n\n\($diff)"
               }]
             }]
           }' > body.json
@@ -46,31 +52,50 @@ jobs:
             -H "x-goog-api-key: $GEMINI_API_KEY" \
             -H "Content-Type: application/json" \
             -X POST \
-            -d @body.json > review.json
+            -d @body.json > review_raw.json
 
-          echo "Gemini response:"
+      - name: Extract AI review JSON
+        run: |
+          jq -r '.candidates[0].content.parts[0].text' review_raw.json > review.json
+          echo "AI review:"
           cat review.json
 
-      - name: Extract review text
-        id: extract
-        run: |
-          REVIEW=$(jq -r '.candidates[0].content.parts[0].text' review.json)
-
-          echo "review<<EOF" >> $GITHUB_OUTPUT
-          echo "$REVIEW" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Comment review on PR
+      - name: Create inline comments
         uses: actions/github-script@v7
-        env:
-          REVIEW: ${{ steps.extract.outputs.review }}
         with:
           script: |
-            const review = process.env.REVIEW;
+            const fs = require("fs")
 
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            let text = fs.readFileSync("review.json", "utf8")
+
+            // remove ```json ``` wrappers if present
+            text = text.replace(/```json/g, "").replace(/```/g, "").trim()
+
+            let comments = []
+
+            try {
+              comments = JSON.parse(text)
+            } catch (e) {
+              console.log("Invalid JSON from AI")
+              console.log(text)
+              return
+            }
+
+            const formatted = comments.map(c => ({
+              path: c.file,
+              line: c.line,
+              body: "🤖 **AI Kotlin Review**\n\n" + c.comment
+            }))
+
+            if (formatted.length === 0) {
+              console.log("No comments")
+              return
+            }
+
+            await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: "🤖 **AI Code Review (Gemini)**\n\n" + review
-            });
+              pull_number: context.issue.number,
+              event: "COMMENT",
+              comments: formatted
+            })
